@@ -1,0 +1,6 @@
+{
+  "name": "Buddy",
+  "description": "AI Career Execution OS for students, freshers, and job switchers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
