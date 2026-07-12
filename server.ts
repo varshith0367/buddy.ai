@@ -5,7 +5,6 @@
 
 import express, { Request, Response, NextFunction } from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { db } from "./src/server/db";
@@ -22,8 +21,16 @@ declare global {
   }
 }
 
-const app = express();
+export const app = express();
 const PORT = 3000;
+
+// Netlify serverless routing prefix rewrite
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.url && req.url.startsWith("/.netlify/functions/api")) {
+    req.url = req.url.replace("/.netlify/functions/api", "/api");
+  }
+  next();
+});
 
 // Increase payload size to allow base64 file uploads (resumes, documents)
 app.use(express.json({ limit: "15mb" }));
@@ -143,7 +150,8 @@ async function safeGenerateContent(params: {
 }
 
 // Helper to validate email format on the server side
-function isValidEmail(email: string): boolean {
+function isValidEmail(email: any): boolean {
+  if (typeof email !== "string") return false;
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email.trim());
 }
@@ -166,6 +174,15 @@ app.post("/api/auth/signup", (req: Request, res: Response) => {
 
   // Auto-login after signup
   const loginResult = db.login(email, password);
+  if (loginResult.token) {
+    res.cookie("token", loginResult.token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+      maxAge: 30 * 24 * 3600 * 1000, // 30 days
+    });
+  }
+
   res.json({
     success: true,
     user: { id: result.user!.id, email: result.user!.email, full_name: result.user!.full_name },
@@ -186,6 +203,15 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
   const result = db.login(email, password);
   if (result.error) {
     return res.status(400).json({ error: result.error });
+  }
+
+  if (result.token) {
+    res.cookie("token", result.token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+      maxAge: 30 * 24 * 3600 * 1000, // 30 days
+    });
   }
 
   res.json({
@@ -210,6 +236,13 @@ app.post("/api/auth/logout", (req: Request, res: Response) => {
   if (token) {
     db.logout(token);
   }
+
+  res.clearCookie("token", {
+    httpOnly: true,
+    secure: true,
+    sameSite: "none",
+  });
+
   res.json({ success: true });
 });
 
@@ -1130,11 +1163,29 @@ function getSimulatedJobReview(jobDescription: string) {
   };
 }
 
+// --- GLOBAL ERROR HANDLING MIDDLEWARE FOR API ---
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  if (req.path.startsWith("/api/")) {
+    console.error("Internal Server Error for API:", err);
+    return res.status(500).json({
+      error: "Internal server error. Please try again later.",
+      details: process.env.NODE_ENV !== "production" ? err.message : undefined
+    });
+  }
+  next(err);
+});
+
+// --- CATCH-ALL FOR UNMATCHED API ENDPOINTS ---
+app.all("/api/*", (req: Request, res: Response) => {
+  res.status(404).json({ error: `API endpoint ${req.method} ${req.path} not found` });
+});
+
 // --- PLATFORM DEV SERVER AND PRODUCTION ASSET SERVING ---
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     // Development mode with Vite's Hot Module Replacement middleware
     console.log("Setting up Vite development middleware server...");
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1146,6 +1197,14 @@ async function startServer() {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req: Request, res: Response) => {
+      // Return 404 for missing static assets (JS, CSS, images, etc.) to prevent serving index.html as a script
+      const isAsset = req.path.startsWith("/assets/") || 
+                      req.path.startsWith("/src/") ||
+                      /\.(js|css|png|jpg|jpeg|gif|svg|ico|json|woff|woff2|ttf)$/i.test(req.path);
+                      
+      if (isAsset) {
+        return res.status(404).send("Asset not found");
+      }
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
@@ -1155,6 +1214,12 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error("Critical: Failed to boot full-stack Express + Vite server.", err);
-});
+// Export the app for serverless environments (like Netlify Functions)
+export default app;
+
+// Only start the standalone listener if not running in a Netlify function / Lambda environment
+if (!process.env.NETLIFY && !process.env.LAMBDA_TASK_ROOT) {
+  startServer().catch((err) => {
+    console.error("Critical: Failed to boot full-stack Express + Vite server.", err);
+  });
+}
