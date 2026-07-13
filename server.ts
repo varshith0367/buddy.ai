@@ -1185,7 +1185,8 @@ async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     // Development mode with Vite's Hot Module Replacement middleware
     console.log("Setting up Vite development middleware server...");
-    const { createServer: createViteServer } = await import("vite");
+    const viteModule = "vite";
+    const { createServer: createViteServer } = await import(viteModule);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
